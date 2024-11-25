@@ -38,464 +38,225 @@ class Schedule:
         if event:
             self.events.append(event)
 
-    def fitness(self, groups: Dict[str, Dict], lecturers: Dict[str, Dict], auditoriums: Dict[str, int]) -> int:
-        self.hard_constraints_violations = 0
-        self.soft_constraints_score = 0
+        def fitness(self, groups: Dict[str, Dict], lecturers: Dict[str, Dict], auditoriums: Dict[str, int]) -> int:
+            self.hard_constraints_violations = 0
+            self.soft_constraints_score = 0
+            self._validate_hard_constraints(groups, lecturers, auditoriums)
+            self._validate_soft_constraints(groups, lecturers, auditoriums)
+            return self.hard_constraints_violations * 1000 + self.soft_constraints_score
 
-        lecturer_times: Dict[Tuple[str, str], Event] = {}
-        group_times: Dict[Tuple[str, str], Event] = {}
-        subgroup_times: Dict[Tuple[str, str, str], Event] = {}
-        auditorium_times: Dict[Tuple[str, str], Event] = {}
-        lecturer_hours: Dict[Tuple[str, str], float] = {}
+        def _validate_hard_constraints(self, groups, lecturers, auditoriums):
+            lecturer_times, group_times, auditorium_times = {}, {}, {}
+            for event in self.events:
+                # Лог перевірок
+                print(f"Перевірка: {event.subject_name} для групи {event.group_ids} у {event.timeslot}")
 
-        # Додаткові структури для перевірки кафедральної узгодженості
-        department_timeslots: Dict[str, Dict[str, List[Event]]] = {}
-        # Формуємо структуру: {department_prefix: {timeslot: [events]}}
-        for event in self.events:
-            # Визначаємо департамент через префікс групи (припускаємо, що всі групи в події з одного департаменту)
-            if event.group_ids:
-                department_prefix = event.group_ids[0].split('-')[0]
-            else:
-                continue  # Якщо немає груп, пропускаємо подію
-
-            if department_prefix not in department_timeslots:
-                department_timeslots[department_prefix] = {}
-            if event.timeslot not in department_timeslots[department_prefix]:
-                department_timeslots[department_prefix][event.timeslot] = []
-            department_timeslots[department_prefix][event.timeslot].append(event)
-
-        for event in self.events:
-            # Жорсткі обмеження
-            self._check_hard_constraints(event, lecturer_times, group_times, subgroup_times,
-                                         auditorium_times, lecturer_hours, lecturers)
-
-            # М'які обмеження
-            self._check_soft_constraints(event, groups, lecturers, auditoriums)
-
-        # Додаткові жорсткі обмеження: узгодженість кафедри
-        for department_prefix, timeslots in department_timeslots.items():
-            department_groups = [gid for gid in groups if gid.startswith(department_prefix)]
-            for timeslot, events in timeslots.items():
-                # Визначаємо, які групи мають лекції в цьому часовому слоті
-                groups_with_lecture = set()
-                for event in events:
-                    groups_with_lecture.update(event.group_ids)
-                # Якщо деякі групи мають лекцію, а інші ні, це порушення
-                if groups_with_lecture and groups_with_lecture != set(department_groups):
-                    self.hard_constraints_violations += 1
-
-        # Загальна оцінка
-        total_score = self.hard_constraints_violations * 1000 + self.soft_constraints_score
-        return total_score
-
-    def _check_hard_constraints(
-        self,
-        event: Event,
-        lecturer_times: Dict[Tuple[str, str], Event],
-        group_times: Dict[Tuple[str, str], Event],
-        subgroup_times: Dict[Tuple[str, str, str], Event],
-        auditorium_times: Dict[Tuple[str, str], Event],
-        lecturer_hours: Dict[Tuple[str, str], float],
-        lecturers: Dict[str, Dict]
-    ) -> None:
-        # Перевірка зайнятості викладача
-        lt_key = (event.lecturer_id, event.timeslot)
-        if lt_key in lecturer_times:
-            self.hard_constraints_violations += 1
-        else:
-            lecturer_times[lt_key] = event
-
-        # Перевірка зайнятості груп та підгруп
-        for group_id in event.group_ids:
-            gt_key = (group_id, event.timeslot)
-            if gt_key in group_times:
-                self.hard_constraints_violations += 1
-            else:
-                group_times[gt_key] = event
-
-            if event.subgroup_ids and group_id in event.subgroup_ids:
-                subgroup_id = event.subgroup_ids[group_id]
-                sgt_key = (group_id, subgroup_id, event.timeslot)
-                if sgt_key in subgroup_times:
+                # Перевірка зайнятості викладача
+                if (event.lecturer_id, event.timeslot) in lecturer_times:
+                    print(f"Порушення: Викладач {event.lecturer_id} зайнятий у {event.timeslot}")
                     self.hard_constraints_violations += 1
                 else:
-                    subgroup_times[sgt_key] = event
+                    lecturer_times[(event.lecturer_id, event.timeslot)] = event
 
-        # Перевірка зайнятості аудиторії
-        at_key = (event.auditorium_id, event.timeslot)
-        if at_key in auditorium_times:
-            existing_event = auditorium_times[at_key]
-            if not (event.event_type == 'Лекція' and
-                    existing_event.event_type == 'Лекція' and
-                    event.lecturer_id == existing_event.lecturer_id):
-                self.hard_constraints_violations += 1
-        else:
-            auditorium_times[at_key] = event
-
-        # Перевірка навантаження викладача
-        week = event.timeslot.split(' - ')[0]
-        lecturer_hours_key = (event.lecturer_id, week)
-        lecturer_hours[lecturer_hours_key] = lecturer_hours.get(lecturer_hours_key, 0) + 1.5
-        if lecturer_hours[lecturer_hours_key] > lecturers[event.lecturer_id]['MaxHoursPerWeek']:
-            self.hard_constraints_violations += 1
-
-    def _check_soft_constraints(
-        self,
-        event: Event,
-        groups: Dict[str, Dict],
-        lecturers: Dict[str, Dict],
-        auditoriums: Dict[str, int]
-    ) -> None:
-        total_group_size = sum(
-            groups[g]['NumStudents'] // 2 if event.subgroup_ids and g in event.subgroup_ids else groups[g]['NumStudents']
-            for g in event.group_ids
-        )
-        if auditoriums[event.auditorium_id] < total_group_size:
-            self.soft_constraints_score += 1
-
-        if event.subject_id not in lecturers[event.lecturer_id]['SubjectsCanTeach']:
-            self.soft_constraints_score += 1
-
-        if event.event_type not in lecturers[event.lecturer_id]['TypesCanTeach']:
-            self.soft_constraints_score += 1
-
-def generate_initial_population(
-    pop_size: int,
-    groups: Dict[str, Dict],
-    subjects: List[Dict],
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int]
-) -> List[Schedule]:
-    population: List[Schedule] = []
-    for _ in range(pop_size):
-        lecturer_times: Dict[Tuple[str, str], Event] = {}
-        group_times: Dict[Tuple[str, str], Event] = {}
-        subgroup_times: Dict[Tuple[str, str, str], Event] = {}
-        auditorium_times: Dict[Tuple[str, str], Event] = {}
-        schedule = Schedule()
-
-        for subj in subjects:
-            weeks = [subj['weekType']] if subj['weekType'] in WEEK_TYPE else WEEK_TYPE
-            for week in weeks:
-                # Додаємо лекції
-                for _ in range(subj['numLectures']):
-                    event = create_random_event(
-                        subj, groups, lecturers, auditoriums, 'Лекція', week,
-                        lecturer_times, group_times, subgroup_times, auditorium_times
-                    )
-                    if event:
-                        schedule.add_event(event)
-
-                # Додаємо практичні/лабораторні заняття
-                for _ in range(subj['numPracticals']):
-                    if subj['requiresSubgroups']:
-                        for subgroup_id in groups[subj['groupID']]['Subgroups']:
-                            subgroup_ids = {subj['groupID']: subgroup_id}
-                            event = create_random_event(
-                                subj, groups, lecturers, auditoriums, 'Практика', week,
-                                lecturer_times, group_times, subgroup_times, auditorium_times, subgroup_ids
-                            )
-                            if event:
-                                schedule.add_event(event)
+                # Перевірка зайнятості груп
+                for group_id in event.group_ids:
+                    if (group_id, event.timeslot) in group_times:
+                        print(f"Порушення: Група {group_id} зайнята у {event.timeslot}")
+                        self.hard_constraints_violations += 1
                     else:
-                        event = create_random_event(
-                            subj, groups, lecturers, auditoriums, 'Практика', week,
-                            lecturer_times, group_times, subgroup_times, auditorium_times
-                        )
-                        if event:
-                            schedule.add_event(event)
+                        group_times[(group_id, event.timeslot)] = event
 
-        population.append(schedule)
+                # Перевірка зайнятості аудиторії
+                if (event.auditorium_id, event.timeslot) in auditorium_times:
+                    print(f"Порушення: Аудиторія {event.auditorium_id} зайнята у {event.timeslot}")
+                    self.hard_constraints_violations += 1
+                else:
+                    auditorium_times[(event.auditorium_id, event.timeslot)] = event
 
-    return population
+        def _validate_soft_constraints(self, groups, lecturers, auditoriums):
+            group_subject_hours = {gid: {} for gid in groups}
+            for event in self.events:
+                for group_id in event.group_ids:
+                    if event.subject_id not in group_subject_hours[group_id]:
+                        group_subject_hours[group_id][event.subject_id] = 0
+                    if event.subgroup_ids and group_id in event.subgroup_ids:
+                        group_subject_hours[group_id][event.subject_id] += 0.75  # По 0.75 години на підгрупу
+                    else:
+                        group_subject_hours[group_id][event.subject_id] += 1.5
+
+            for group_id, subjects in group_subject_hours.items():
+                for subject_id, hours in subjects.items():
+                    required_hours = groups[group_id]['Subjects'][subject_id]['TotalHours']
+                    if hours < required_hours:
+                        self.soft_constraints_score += (required_hours - hours)
+
+        def mutate(self, groups, lecturers, auditoriums):
+            if random.random() < 0.5:
+                self._remove_event()
+            else:
+                self._add_event(groups, lecturers, auditoriums)
+
+        def _remove_event(self):
+            if self.events:
+                event_to_remove = random.choice(self.events)
+                if event_to_remove.subgroup_ids:
+                    self.events = [
+                        e for e in self.events
+                        if not (e.group_ids == event_to_remove.group_ids and e.timeslot == event_to_remove.timeslot)
+                    ]
+                else:
+                    self.events.remove(event_to_remove)
+
+        def _add_event(self, groups, lecturers, auditoriums):
+            new_event = create_random_event(
+                random.choice(list(groups.keys())),
+                groups,
+                lecturers,
+                auditoriums
+            )
+            if new_event:
+                self.add_event(new_event)
+
+        def create_random_event(
+                group_id: str,
+                groups: Dict,
+                lecturers: Dict,
+                auditoriums: Dict
+        ) -> Optional[Event]:
+            suitable_subjects = groups[group_id]['Subjects']
+            subject_id, subject = random.choice(list(suitable_subjects.items()))
+
+            suitable_lecturers = [
+                lid for lid, l in lecturers.items() if subject_id in l['SubjectsCanTeach']
+            ]
+            if not suitable_lecturers:
+                return None
+
+            lecturer_id = random.choice(suitable_lecturers)
+
+            suitable_auditoriums = [
+                aid for aid, cap in auditoriums.items() if cap >= groups[group_id]['NumStudents']
+            ]
+            if not suitable_auditoriums:
+                return None
+
+            auditorium_id = random.choice(suitable_auditoriums)
+
+            timeslot = random.choice(TIMESLOTS)
+
+            return Event(
+                timeslot=timeslot,
+                group_ids=[group_id],
+                subject_id=subject_id,
+                subject_name=subject['name'],
+                lecturer_id=lecturer_id,
+                auditorium_id=auditorium_id,
+                event_type=random.choice(['Лекція', 'Практика'])
+            )
 
 def create_random_event(
-    subj: Dict,
-    groups: Dict[str, Dict],
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int],
-    event_type: str,
-    week_type: str,
-    lecturer_times: Dict[Tuple[str, str], Event],
-    group_times: Dict[Tuple[str, str], Event],
-    subgroup_times: Dict[Tuple[str, str, str], Event],
-    auditorium_times: Dict[Tuple[str, str], Event],
-    subgroup_ids: Optional[Dict[str, str]] = None
+        group_id: str,
+        groups: Dict,
+        lecturers: Dict,
+        auditoriums: Dict
 ) -> Optional[Event]:
-    available_timeslots = [t for t in TIMESLOTS if t.startswith(week_type)]
-    if not available_timeslots:
-        return None
-    timeslot = random.choice(available_timeslots)
+    suitable_subjects = groups[group_id]['Subjects']
+    subject_id, subject = random.choice(list(suitable_subjects.items()))
 
-    # Знаходимо викладачів, які можуть викладати цей предмет і тип заняття
     suitable_lecturers = [
-        lid for lid, l in lecturers.items()
-        if subj['id'] in l['SubjectsCanTeach'] and event_type in l['TypesCanTeach']
+        lid for lid, l in lecturers.items() if subject_id in l['SubjectsCanTeach']
     ]
     if not suitable_lecturers:
         return None
 
-    # Вибираємо випадкового викладача, який не зайнятий у цей часовий слот
-    random.shuffle(suitable_lecturers)
-    lecturer_id = next((lid for lid in suitable_lecturers if (lid, timeslot) not in lecturer_times), None)
-    if not lecturer_id:
-        return None
+    lecturer_id = random.choice(suitable_lecturers)
 
-    # Вибір груп з однаковим префіксом для лекцій
-    if event_type == 'Лекція':
-        # Витягуємо всі унікальні префікси
-        prefixes = set(gid.split('-')[0] for gid in groups.keys())
-        available_prefixes = []
-        prefix_to_available_groups = {}
-        for prefix in prefixes:
-            available = [gid for gid in groups if gid.startswith(prefix) and (gid, timeslot) not in group_times]
-            if available:
-                available_prefixes.append(prefix)
-                prefix_to_available_groups[prefix] = available
-        if not available_prefixes:
-            return None
-        # Вибираємо випадковий префікс
-        selected_prefix = random.choice(list(available_prefixes))
-        available_groups = prefix_to_available_groups[selected_prefix]
-        # Вибираємо кількість груп для лекції (від 1 до 3 або максимально доступні)
-        num_groups = random.randint(1, min(3, len(available_groups)))
-        group_ids = random.sample(available_groups, num_groups)
-    else:
-        group_id = subj['groupID']
-        if (group_id, timeslot) in group_times:
-            return None
-        group_ids = [group_id]
-
-    # Перевірка зайнятості груп
-    for gid in group_ids:
-        if (gid, timeslot) in group_times:
-            return None
-
-    # Перевірка зайнятості підгруп
-    if event_type == 'Практика' and subj['requiresSubgroups']:
-        if subgroup_ids is None:
-            subgroup_ids = {gid: random.choice(groups[gid]['Subgroups']) for gid in group_ids}
-        for gid, sgid in subgroup_ids.items():
-            if (gid, sgid, timeslot) in subgroup_times:
-                return None
-    else:
-        subgroup_ids = None
-
-    # Вибір аудиторії з підходящою місткістю
-    total_group_size = sum(
-        groups[gid]['NumStudents'] // 2 if subgroup_ids and gid in subgroup_ids else groups[gid]['NumStudents']
-        for gid in group_ids
-    )
     suitable_auditoriums = [
-        aid for aid, cap in auditoriums.items() if cap >= total_group_size
+        aid for aid, cap in auditoriums.items() if cap >= groups[group_id]['NumStudents']
     ]
     if not suitable_auditoriums:
         return None
 
-    # Вибір вільної аудиторії
-    random.shuffle(suitable_auditoriums)
-    auditorium_id = next((aid for aid in suitable_auditoriums if (aid, timeslot) not in auditorium_times), None)
-    if not auditorium_id:
-        return None
+    auditorium_id = random.choice(suitable_auditoriums)
 
-    event = Event(
+    timeslot = random.choice(TIMESLOTS)
+
+    return Event(
         timeslot=timeslot,
-        group_ids=group_ids,
-        subject_id=subj['id'],
-        subject_name=subj['name'],
+        group_ids=[group_id],
+        subject_id=subject_id,
+        subject_name=subject['name'],
         lecturer_id=lecturer_id,
         auditorium_id=auditorium_id,
-        event_type=event_type,
-        subgroup_ids=subgroup_ids,
-        week_type=week_type
+        event_type=random.choice(['Лекція', 'Практика'])
     )
 
-    # Реєструємо зайнятість
-    lecturer_times[(lecturer_id, timeslot)] = event
-    for gid in group_ids:
-        group_times[(gid, timeslot)] = event
-        if event_type == 'Практика' and subgroup_ids and gid in subgroup_ids:
-            sgid = subgroup_ids[gid]
-            subgroup_times[(gid, sgid, timeslot)] = event
-    auditorium_times[(auditorium_id, timeslot)] = event
-
-    return event
-
-def select_population(
-    population: List[Schedule],
-    groups: Dict[str, Dict],
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int],
-    fitness_function
-) -> List[Schedule]:
-    population.sort(key=lambda x: fitness_function(x, groups, lecturers, auditoriums))
-    return population[:len(population) // 2] if len(population) > 1 else population
-
-def herbivore_smoothing(
-    population: List[Schedule],
-    best_schedule: Schedule,
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int],
-    intensity: float = 0.1
-) -> List[Schedule]:
-    new_population: List[Schedule] = []
-    for _ in range(len(population)):
-        new_schedule = copy.deepcopy(best_schedule)
-        mutate(new_schedule, lecturers, auditoriums, intensity)
-        new_population.append(new_schedule)
-    return new_population
-
-def predator_approach(
-    population: List[Schedule],
-    groups: Dict[str, Dict],
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int],
-    fitness_function
-) -> List[Schedule]:
-    return select_population(population, groups, lecturers, auditoriums, fitness_function)
-
-def rain(
-    population_size: int,
-    groups: Dict[str, Dict],
-    subjects: List[Dict],
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int]
-) -> List[Schedule]:
-    return generate_initial_population(population_size, groups, subjects, lecturers, auditoriums)
-
-def mutate(
-    schedule: Schedule,
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int],
-    intensity: float = 0.3
-) -> None:
-    num_events_to_mutate = max(2, int(len(schedule.events) * intensity))
-    if num_events_to_mutate % 2 != 0:
-        num_events_to_mutate += 1
-    num_events_to_mutate = min(num_events_to_mutate, len(schedule.events) - (len(schedule.events) % 2))
-
-    events_to_mutate = random.sample(schedule.events, num_events_to_mutate)
-    for i in range(0, len(events_to_mutate), 2):
-        event1, event2 = events_to_mutate[i], events_to_mutate[i + 1]
-
-        if can_swap_events(event1, event2):
-            # Обмін часовими слотами
-            event1.timeslot, event2.timeslot = event2.timeslot, event1.timeslot
-
-            # Обмін аудиторіями з імовірністю 50%
-            if random.random() < 0.5 and can_swap_auditoriums(event1, event2):
-                event1.auditorium_id, event2.auditorium_id = event2.auditorium_id, event1.auditorium_id
-
-            # Обмін викладачами з імовірністю 50%
-            if random.random() < 0.5 and can_swap_lecturers(event1, event2):
-                event1.lecturer_id, event2.lecturer_id = event2.lecturer_id, event1.lecturer_id
-
-def can_swap_events(event1: Event, event2: Event) -> bool:
-    # Обмін можливий, якщо не виникає конфлікт типів занять для груп
-    group_conflict = any(
-        g in event2.group_ids for g in event1.group_ids
-    ) and event1.event_type != event2.event_type
-    return not group_conflict
-
-def can_swap_auditoriums(event1: Event, event2: Event) -> bool:
-    return event1.auditorium_id != event2.auditorium_id
-
-def can_swap_lecturers(event1: Event, event2: Event) -> bool:
-    return event1.lecturer_id != event2.lecturer_id
-
-def soft_constraints_fitness(schedule: Schedule) -> int:
-    return schedule.soft_constraints_score
-
-def hard_constraints_fitness(schedule: Schedule) -> int:
-    return schedule.hard_constraints_violations
-
-def select_from_population(
-    population: List[Schedule],
-    fitness_function,
-    n: int
-) -> List[Schedule]:
-    population.sort(key=fitness_function)
-    return population[:n]
 
 def crossover(parent1: Schedule, parent2: Schedule) -> Tuple[Schedule, Schedule]:
-    child1, child2 = copy.deepcopy(parent1), copy.deepcopy(parent2)
-    crossover_point = len(parent1.events) // 2
+    child1, child2 = Schedule(), Schedule()
 
-    child1.events[crossover_point:], child2.events[crossover_point:] = (
-        parent2.events[crossover_point:], parent1.events[crossover_point:]
-    )
+    for timeslot in TIMESLOTS:
+        if random.random() < 0.5:
+            child1.events += [e for e in parent1.events if e.timeslot == timeslot]
+            child2.events += [e for e in parent2.events if e.timeslot == timeslot]
+        else:
+            child1.events += [e for e in parent2.events if e.timeslot == timeslot]
+            child2.events += [e for e in parent1.events if e.timeslot == timeslot]
+
     return child1, child2
 
-def select_top_n(
-    population: List[Schedule],
-    fitness_function,
-    n: int
+
+def genetic_algorithm(groups, lecturers, auditoriums, generations=100, pop_size=50):
+    population = generate_initial_population(pop_size, groups, lecturers, auditoriums)
+
+    for generation in range(generations):
+        population = sorted(population, key=lambda s: s.fitness(groups, lecturers, auditoriums))
+        best = population[0]
+
+        print(f"Покоління {generation + 1}/{generations}: Найкращий розклад - {len(best.events)} подій, "
+              f"Порушень: {best.hard_constraints_violations}, Soft score: {best.soft_constraints_score}")
+
+        if best.hard_constraints_violations == 0 and best.soft_constraints_score == 0:
+            return best
+
+        new_population = []
+        while len(new_population) < pop_size:
+            parent1, parent2 = random.sample(population[:10], 2)
+            child1, child2 = crossover(parent1, parent2)
+            child1.mutate(groups, lecturers, auditoriums)
+            child2.mutate(groups, lecturers, auditoriums)
+            new_population.extend([child1, child2])
+
+        population = new_population[:pop_size]
+
+    return population[0]
+
+
+def generate_initial_population(
+        pop_size: int,
+        groups: Dict[str, Dict],
+        lecturers: Dict[str, Dict],
+        auditoriums: Dict[str, int]
 ) -> List[Schedule]:
-    return select_from_population(population, fitness_function, n)
+    population = []
+    for i in range(pop_size):
+        schedule = Schedule()
+        for group_id, group in groups.items():
+            for subject_id, subject in group['Subjects'].items():
+                num_events = int(subject['TotalHours'] // 1.5)  # 1.5 години на подію
+                created_events = 0
+                for _ in range(num_events):
+                    new_event = create_random_event(group_id, groups, lecturers, auditoriums)
+                    if new_event:
+                        schedule.add_event(new_event)
+                        created_events += 1
+                print(
+                    f"Генерація: Група {group_id}, Предмет {subject_id}, Заплановано занять: {num_events}, Створено: {created_events}")
+        print(f"Розклад {i + 1}/{pop_size}: Подій створено {len(schedule.events)}")
+        population.append(schedule)
+    return population
 
-def genetic_algorithm(
-    groups: Dict[str, Dict],
-    subjects: List[Dict],
-    lecturers: Dict[str, Dict],
-    auditoriums: Dict[str, int],
-    generations: int = 100
-) -> Optional[Schedule]:
-    population_size = 50
-    n_best_to_select = 10
-    population = generate_initial_population(population_size, groups, subjects, lecturers, auditoriums)
 
-    # Етап 1: Жорсткі обмеження
-    for generation in range(generations):
-        population = select_top_n(population, hard_constraints_fitness, n_best_to_select)
-
-        best_schedule = population[0]
-        if best_schedule.hard_constraints_violations == 0:
-            print(f"Покоління: {generation + 1}, Найкращий розклад для жорстких обмежень знайдено.")
-            break
-        else:
-            print(f"Покоління: {generation + 1}, Найкращий розклад має {best_schedule.hard_constraints_violations} порушень жорстких обмежень.")
-
-        # Схрещування
-        new_population: List[Schedule] = []
-        while len(new_population) < population_size:
-            parent1, parent2 = random.sample(population, 2)
-            child1, child2 = crossover(parent1, parent2)
-            new_population.extend([child1, child2])
-
-        # Мутація
-        for schedule in new_population:
-            if random.random() < 0.3:
-                mutate(schedule, lecturers, auditoriums)
-
-        population = new_population
-
-    # Етап 2: Оптимізація м'яких обмежень
-    for generation in range(generations):
-        population = select_top_n(population, soft_constraints_fitness, n_best_to_select)
-
-        best_schedule = population[0]
-        best_fitness = best_schedule.soft_constraints_score
-        print(f"Покоління: {generation + 1}, Оптимізація м'яких обмежень, поточна найкраща оцінка: {best_fitness}")
-
-        if best_fitness == 0:
-            print("Розклад оптимізовано без порушень м'яких обмежень.")
-            break
-
-        # Схрещування
-        new_population: List[Schedule] = []
-        while len(new_population) < population_size:
-            parent1, parent2 = random.sample(population, 2)
-            child1, child2 = crossover(parent1, parent2)
-            new_population.extend([child1, child2])
-
-        # Мутація
-        for schedule in new_population:
-            if random.random() < 0.3:
-                mutate(schedule, lecturers, auditoriums)
-
-        population = new_population
-
-    return best_schedule
 
 # Функція для виведення розкладу з додатковою інформацією
 def print_schedule(schedule, lecturers, groups, auditoriums):
@@ -573,157 +334,42 @@ def validate_data(groups, lecturers, subjects, auditoriums):
 def main():
     # Дані аудиторій
     auditoriums = {
-        'A1': 30,
-        'A2': 30,
-        'A3': 30,
-        'A4': 30,
-        'B1': 30,
-        'B2': 45,
-        'B3': 60,
-        'B4': 60,
+        'A1': 100,
+        'A2': 100
     }
 
     # Дані груп
     groups = {
-        'TTP-41': {
-            'NumStudents': 30,
-            'Subgroups': ['1', '2']
-        },
-        'TTP-42': {
-            'NumStudents': 32,
-            'Subgroups': ['1', '2']
-        },
-        'TK-41': {
-            'NumStudents': 28,
-            'Subgroups': ['1', '2']
-        },
-        'MI-41': {
-            'NumStudents': 32,
-            'Subgroups': ['1', '2']
-        },
-        'MI-42': {
+        'G1': {
             'NumStudents': 20,
-            'Subgroups': ['1', '2']
+            'Subjects': {
+                'S1': {'name': 'Math', 'TotalHours': 3},
+            }
+        },
+        'G2': {
+            'NumStudents': 30,
+            'Subjects': {
+                'S2': {'name': 'Physics', 'TotalHours': 3},
+            }
         }
     }
 
     # Дані викладачів
     lecturers = {
         'L1': {
-            'lecturerName': 'Мащенко С.О.',
             'SubjectsCanTeach': ['S1', 'S2'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
-        'L2': {
-            'lecturerName': 'Пашко А.О.',
-            'SubjectsCanTeach': ['S2', 'S3'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 18
-        },
-        'L3': {
-            'lecturerName': 'Тарануха В.Ю.',
-            'SubjectsCanTeach': ['S3', 'S4'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
-        'L4': {
-            'lecturerName': 'Ткаченко О.М.',
-            'SubjectsCanTeach': ['S4', 'S5'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
-        'L5': {
-            'lecturerName': 'Шишацька О.В.',
-            'SubjectsCanTeach': ['S5', 'S1'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
-        'L6': {
-            'lecturerName': 'Криволап А.В.',
-            'SubjectsCanTeach': ['S4', 'S5'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
-        'L7': {
-            'lecturerName': 'Свистунов А.О.',
-            'SubjectsCanTeach': ['S4', 'S5'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
-        'L8': {
-            'lecturerName': 'Зінько Т.П.',
-            'SubjectsCanTeach': ['S1', 'S2'],
-            'TypesCanTeach': ['Лекція', 'Практика'],
-            'MaxHoursPerWeek': 20
-        },
+            'MaxHoursPerWeek': 10
+        }
     }
 
-    # Дані предметів
-    subjects = [
-        {
-            'id': 'S1',
-            'name': 'Теорія прийняття рішень',
-            'groupID': 'TTP-41',
-            'numLectures': 14,
-            'numPracticals': 14,
-            'requiresSubgroups': True,
-            'weekType': 'Both'
-        },
-        {
-            'id': 'S2',
-            'name': 'Статистичне моделювання',
-            'groupID': 'TTP-42',
-            'numLectures': 14,
-            'numPracticals': 14,
-            'requiresSubgroups': True,
-            'weekType': 'Both'
-        },
-        {
-            'id': 'S3',
-            'name': 'Інтелектуальні системи',
-            'groupID': 'TK-41',
-            'numLectures': 14,
-            'numPracticals': 14,
-            'requiresSubgroups': True,
-            'weekType': 'Both'
-        },
-        {
-            'id': 'S4',
-            'name': 'Інформаційні технології',
-            'groupID': 'MI-41',
-            'numLectures': 14,
-            'numPracticals': 14,
-            'requiresSubgroups': True,
-            'weekType': 'Both'
-        },
-        {
-            'id': 'S5',
-            'name': 'Розробка ПЗ під мобільні',
-            'groupID': 'MI-42',
-            'numLectures': 14,
-            'numPracticals': 14,
-            'requiresSubgroups': True,
-            'weekType': 'Both'
-        },
-    ]
+    print("Стартуємо генетичний алгоритм...")
+    best_schedule = genetic_algorithm(groups, lecturers, auditoriums, generations=10, pop_size=5)
 
-    # Валідація даних перед запуском алгоритму
-    try:
-        validate_data(groups, lecturers, subjects, auditoriums)
-    except ValueError as e:
-        print(f"Data validation error: {e}")
-        return
-
-    # Генерація розкладу
-    best_schedule = genetic_algorithm(groups, subjects, lecturers, auditoriums, generations=100)
-
-    # Вивід результату
-    if best_schedule:
-        print("\nНайкращий розклад знайдено:")
-        print_schedule(best_schedule, lecturers, groups, auditoriums)
+    if not best_schedule or not best_schedule.events:
+        print("Не вдалося знайти розклад, що відповідає обмеженням.")
     else:
-        print("Немає знайденого розкладу, що задовольняє всі обмеження.")
+        print("Найкращий розклад знайдено:")
+        print_schedule(best_schedule, lecturers, groups, auditoriums)
 
 if __name__ == "__main__":
     main()
